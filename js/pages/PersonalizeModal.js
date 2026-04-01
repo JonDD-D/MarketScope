@@ -222,11 +222,11 @@ async function loadStockReturnsForSymbols(symbols, sp500Companies, startDate) {
 async function loadStockReturns(usStockSymbols, sp500Companies, startDate) {
   if (!startDate) return [];
   const startTime = startDate.getTime();
-  const candidateSymbols = buildCandidateSymbols(usStockSymbols, sp500Companies, 500);
+  const candidateSymbols = buildCandidateSymbols(usStockSymbols, sp500Companies, 100);
   if (!candidateSymbols.length) return [];
 
   const results = [];
-  const batchSize = 10;
+  const batchSize = 30;
   for (let i = 0; i < candidateSymbols.length; i += batchSize) {
     const batch = candidateSymbols.slice(i, i + batchSize);
     const loaded = await Promise.all(
@@ -550,11 +550,19 @@ export function initPersonalizeModal(sp500Companies, usStockSymbols = []) {
     const { companies: bestCos, allocations: bestAllocs, initialMoney, startDateLabel } = bestData;
     const { companies: worstCos, allocations: worstAllocs } = worstData;
 
-    function buildSeries(companies, allocations) {
-      const maxLen = Math.max(...companies.map((c) => c.priceHistory?.length ?? 0));
-      if (!maxLen) return [];
-      const out = [];
-      for (let i = 0; i < maxLen; i++) {
+    // Use the longest priceHistory as the spine, thin to ~200 pts up front
+    const spineHist = bestCos.reduce((a, c) => (c.priceHistory?.length ?? 0) > (a.priceHistory?.length ?? 0) ? c : a, bestCos[0]);
+    const fullLen   = spineHist?.priceHistory?.length ?? 0;
+    if (!fullLen) return;
+
+    const STEP = Math.max(1, Math.floor(fullLen / 200));
+    const indices = [];
+    for (let i = 0; i < fullLen; i += STEP) indices.push(i);
+    if (indices[indices.length - 1] !== fullLen - 1) indices.push(fullLen - 1);
+
+    // Weight-sum only the thinned indices — O(200 × n) instead of O(6000 × n)
+    function buildThinSeries(companies, allocations) {
+      return indices.map((i) => {
         let val = 0;
         companies.forEach((c, ci) => {
           const hist = c.priceHistory;
@@ -564,41 +572,32 @@ export function initPersonalizeModal(sp500Companies, usStockSymbols = []) {
           const w     = (allocations[ci] ?? (100 / companies.length)) / 100;
           val += w * (price / base);
         });
-        out.push(initialMoney * val);
-      }
-      return out;
+        return initialMoney * val;
+      });
     }
 
-    const bestSeries  = buildSeries(bestCos,  bestAllocs);
-    const worstSeries = buildSeries(worstCos, worstAllocs);
-    if (!bestSeries.length || !worstSeries.length) return;
+    const bRaw = buildThinSeries(bestCos,  bestAllocs);
+    const wRaw = buildThinSeries(worstCos, worstAllocs);
 
-    const len = Math.min(bestSeries.length, worstSeries.length);
-    const bRaw = bestSeries.slice(0, len);
-    const wRaw = worstSeries.slice(0, len);
-    for (let i = 0; i < len; i++) {
-      if (bRaw[i] < wRaw[i]) [bRaw[i], wRaw[i]] = [wRaw[i], bRaw[i]];
+    // Ensure best >= worst at each point
+    for (let i = 0; i < bRaw.length; i++) {
+      if (bRaw[i] < wRaw[i]) { const tmp = bRaw[i]; bRaw[i] = wRaw[i]; wRaw[i] = tmp; }
     }
-
-    const STEP = Math.max(1, Math.floor(len / 300));
-    const indices = [];
-    for (let i = 0; i < len; i += STEP) indices.push(i);
-    if (indices[indices.length - 1] !== len - 1) indices.push(len - 1);
 
     const startDate = bestCos[0]?.startDate;
     const DAY_MS    = 24 * 60 * 60 * 1000;
-    const pts = indices.map((i) => ({
+    const pts = indices.map((i, j) => ({
       date:  startDate ? new Date(startDate.getTime() + i * DAY_MS) : new Date(2000 + Math.floor(i / 252), 0, 1),
-      best:  bRaw[i],
-      worst: wRaw[i],
+      best:  bRaw[j],
+      worst: wRaw[j],
     }));
 
-    const bestFinal  = bRaw[len - 1];
-    const worstFinal = wRaw[len - 1];
+    const bestFinal  = bRaw[bRaw.length - 1];
+    const worstFinal = wRaw[wRaw.length - 1];
     const bestPct    = ((bestFinal  / initialMoney - 1) * 100).toFixed(1);
     const worstPct   = ((worstFinal / initialMoney - 1) * 100).toFixed(1);
     const fmtD       = (v) => '$' + Math.round(v).toLocaleString();
-    const approxYrs  = (len / 252).toFixed(1);
+    const approxYrs  = (fullLen / 252).toFixed(1);
 
     el.innerHTML = `
       <h2 class="prr-slide-title">Return range</h2>
