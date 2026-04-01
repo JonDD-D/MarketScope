@@ -1,0 +1,9 @@
+{
+  "name": "marketscope",
+  "scripts": {
+    "start": "serve . --single -l ${PORT:-8080}"
+  },
+  "dependencies": {
+    "serve": "^14.0.0"
+  }
+}
